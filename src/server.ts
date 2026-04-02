@@ -5,6 +5,8 @@ import { z } from "zod";
 import { oktaAuth, hasGroup, type OktaClaims } from "./okta-auth.js";
 
 const app = express();
+// Trust Railway's reverse proxy so req.protocol returns "https"
+app.set("trust proxy", 1);
 app.use(express.json());
 
 // Health check (unauthenticated — Railway uses this)
@@ -195,9 +197,10 @@ app.get("/authorize", (req, res) => {
 });
 
 // /token — proxy to Okta's token endpoint
-app.post("/token", express.urlencoded({ extended: false }), async (req, res) => {
+// Read raw body so we can parse it ourselves (express.json() won't handle form-urlencoded)
+app.post("/token", express.text({ type: "application/x-www-form-urlencoded" }), async (req, res) => {
   try {
-    const body = new URLSearchParams(req.body as Record<string, string>);
+    const body = new URLSearchParams(typeof req.body === "string" ? req.body : "");
     // Inject client credentials if the client didn't provide them
     if (!body.has("client_id")) {
       body.set("client_id", OKTA_CLIENT_ID);
