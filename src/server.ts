@@ -12,6 +12,17 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// OAuth Protected Resource Metadata (RFC 9728)
+// Claude Desktop/Code fetches this to discover the authorization server
+app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+  const issuer = process.env["OKTA_ISSUER"] ?? "";
+  res.json({
+    resource: `${_req.protocol}://${_req.get("host")}`,
+    authorization_servers: [issuer],
+    scopes_supported: ["openid"],
+  });
+});
+
 // Info endpoint so you can see what env vars are expected
 app.get("/", (_req, res) => {
   res.json({

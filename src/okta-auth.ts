@@ -64,9 +64,14 @@ export async function oktaAuth(
     return;
   }
 
+  const resourceMetadataUrl = `${req.protocol}://${req.get("host")}/.well-known/oauth-protected-resource`;
+
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Missing Bearer token" });
+    res
+      .status(401)
+      .set("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl}"`)
+      .json({ error: "Missing Bearer token" });
     return;
   }
 
@@ -88,7 +93,10 @@ export async function oktaAuth(
     next();
   } catch (err) {
     const message = err instanceof Error ? err.message : "Token verification failed";
-    res.status(401).json({ error: message });
+    res
+      .status(401)
+      .set("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl}", error="invalid_token"`)
+      .json({ error: message });
   }
 }
 
