@@ -29,8 +29,8 @@ app.get("/", (_req, res) => {
 });
 
 /**
- * Build an McpServer instance scoped to the authenticated user.
- * Tools are registered based on the user's Okta group membership.
+ * Build an McpServer instance for the authenticated user.
+ * If you're authenticated, you get all the tools. Simple.
  */
 function createMcpServerForUser(claims: OktaClaims, groups: string[]) {
   const server = new McpServer({
@@ -38,127 +38,98 @@ function createMcpServerForUser(claims: OktaClaims, groups: string[]) {
     version: "1.0.0",
   });
 
-  const isUser = groups.includes("mcp-users") || groups.includes("mcp-admins");
-  const isAdmin = groups.includes("mcp-admins");
+  server.tool(
+    "greet",
+    "Say hello. Very advanced AI technology.",
+    { name: z.string().describe("Who to greet") },
+    async ({ name }) => ({
+      content: [
+        {
+          type: "text" as const,
+          text: `Hello, ${name}! You are authenticated as ${claims.sub}. Wow.`,
+        },
+      ],
+    })
+  );
 
-  // --- Tools available to mcp-users ---
-
-  if (isUser) {
-    server.tool(
-      "greet",
-      "Say hello. Very advanced AI technology.",
-      { name: z.string().describe("Who to greet") },
-      async ({ name }) => ({
+  server.tool(
+    "roll_dice",
+    "Roll some dice. Because every example needs dice.",
+    {
+      sides: z.number().min(2).max(100).default(6).describe("Number of sides"),
+      count: z.number().min(1).max(20).default(1).describe("Number of dice"),
+    },
+    async ({ sides, count }) => {
+      const rolls = Array.from({ length: count }, () =>
+        Math.floor(Math.random() * sides) + 1
+      );
+      const total = rolls.reduce((a, b) => a + b, 0);
+      return {
         content: [
           {
             type: "text" as const,
-            text: `Hello, ${name}! You are authenticated as ${claims.sub}. Wow.`,
+            text: `Rolled ${count}d${sides}: [${rolls.join(", ")}] = ${total}`,
           },
         ],
-      })
-    );
+      };
+    }
+  );
 
-    server.tool(
-      "roll_dice",
-      "Roll some dice. Because every example needs dice.",
+  server.tool(
+    "magic_8ball",
+    "Ask the magic 8-ball a question. Guaranteed accurate.",
+    { question: z.string().describe("Your yes/no question") },
+    async ({ question }) => {
+      const answers = [
+        "It is certain.",
+        "Without a doubt.",
+        "Don't count on it.",
+        "My reply is no.",
+        "Ask again later.",
+        "Cannot predict now.",
+        "Outlook not so good.",
+        "Signs point to yes.",
+        "Better not tell you now.",
+        "Concentrate and ask again.",
+      ];
+      const answer = answers[Math.floor(Math.random() * answers.length)]!;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Question: "${question}"\n   Answer: ${answer}`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool("who_am_i", "Show your authenticated identity and groups.", async () => ({
+    content: [
       {
-        sides: z.number().min(2).max(100).default(6).describe("Number of sides"),
-        count: z.number().min(1).max(20).default(1).describe("Number of dice"),
+        type: "text" as const,
+        text: JSON.stringify(
+          {
+            sub: claims.sub,
+            groups,
+            node_version: process.version,
+            uptime_seconds: Math.floor(process.uptime()),
+          },
+          null,
+          2
+        ),
       },
-      async ({ sides, count }) => {
-        const rolls = Array.from({ length: count }, () =>
-          Math.floor(Math.random() * sides) + 1
-        );
-        const total = rolls.reduce((a, b) => a + b, 0);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `🎲 Rolled ${count}d${sides}: [${rolls.join(", ")}] = ${total}`,
-            },
-          ],
-        };
-      }
-    );
+    ],
+  }));
 
-    server.tool(
-      "magic_8ball",
-      "Ask the magic 8-ball a question. Guaranteed accurate.",
-      { question: z.string().describe("Your yes/no question") },
-      async ({ question }) => {
-        const answers = [
-          "It is certain.",
-          "Without a doubt.",
-          "Don't count on it.",
-          "My reply is no.",
-          "Ask again later.",
-          "Cannot predict now.",
-          "Outlook not so good.",
-          "Signs point to yes.",
-          "Better not tell you now.",
-          "Concentrate and ask again.",
-        ];
-        const answer = answers[Math.floor(Math.random() * answers.length)]!;
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `🎱 Question: "${question}"\n   Answer: ${answer}`,
-            },
-          ],
-        };
-      }
-    );
-  }
-
-  // --- Tools available to mcp-admins only ---
-
-  if (isAdmin) {
-    server.tool("server_info", "Get server info (admin only).", async () => ({
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(
-            {
-              node_version: process.version,
-              uptime_seconds: Math.floor(process.uptime()),
-              memory_mb: Math.floor(process.memoryUsage().rss / 1024 / 1024),
-              user_sub: claims.sub,
-              user_groups: groups,
-              env: {
-                RAILWAY_ENVIRONMENT: process.env["RAILWAY_ENVIRONMENT"] ?? "unknown",
-              },
-            },
-            null,
-            2
-          ),
-        },
-      ],
-    }));
-
-    server.tool(
-      "echo",
-      "Echo back whatever you send (admin only). For testing.",
-      { message: z.string().describe("Message to echo back") },
-      async ({ message }) => ({
-        content: [{ type: "text" as const, text: `Echo: ${message}` }],
-      })
-    );
-  }
-
-  // If the user has no relevant groups, give them a single tool that tells them so
-  if (!isUser && !isAdmin) {
-    server.tool("access_denied", "You don't have access.", async () => ({
-      content: [
-        {
-          type: "text" as const,
-          text:
-            `You are authenticated as ${claims.sub}, but you are not in the ` +
-            `"mcp-users" or "mcp-admins" Okta groups. Your groups: [${groups.join(", ")}]`,
-        },
-      ],
-    }));
-  }
+  server.tool(
+    "echo",
+    "Echo back whatever you send. For testing.",
+    { message: z.string().describe("Message to echo back") },
+    async ({ message }) => ({
+      content: [{ type: "text" as const, text: `Echo: ${message}` }],
+    })
+  );
 
   return server;
 }
