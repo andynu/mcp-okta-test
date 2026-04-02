@@ -13,12 +13,29 @@ app.get("/health", (_req, res) => {
 });
 
 // OAuth Protected Resource Metadata (RFC 9728)
-// Claude Desktop/Code fetches this to discover the authorization server
-app.get("/.well-known/oauth-protected-resource", (_req, res) => {
-  const issuer = process.env["OKTA_ISSUER"] ?? "";
+// Points Claude to *this server* as the authorization server, since
+// Okta's Org auth server doesn't expose public discovery endpoints.
+// We proxy /authorize and /token to Okta.
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
   res.json({
-    resource: `${_req.protocol}://${_req.get("host")}`,
-    authorization_servers: [issuer],
+    resource: baseUrl,
+    authorization_servers: [baseUrl],
+    scopes_supported: ["openid"],
+  });
+});
+
+// OAuth Authorization Server Metadata (RFC 8414)
+// Claude fetches this to discover the authorize and token endpoints.
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
+  res.json({
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/authorize`,
+    token_endpoint: `${baseUrl}/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256"],
     scopes_supported: ["openid"],
   });
 });
@@ -145,18 +162,65 @@ function createMcpServerForUser(claims: OktaClaims, groups: string[]) {
   return server;
 }
 
-// OAuth callback — exchanges the authorization code for a token
+// --- OAuth proxy to Okta ---
+// Okta's Org auth server doesn't expose public discovery endpoints,
+// so we proxy /authorize and /token through our server.
+
 const OKTA_ISSUER = process.env["OKTA_ISSUER"] ?? "";
 const OKTA_CLIENT_ID = process.env["OKTA_CLIENT_ID"] ?? "";
 const OKTA_CLIENT_SECRET = process.env["OKTA_CLIENT_SECRET"] ?? "";
 
-function tokenEndpoint(issuer: string): string {
+function oktaAuthorizeUrl(issuer: string): string {
+  if (issuer.includes("/oauth2/")) {
+    return `${issuer}/v1/authorize`;
+  }
+  return `${issuer}/oauth2/v1/authorize`;
+}
+
+function oktaTokenUrl(issuer: string): string {
   if (issuer.includes("/oauth2/")) {
     return `${issuer}/v1/token`;
   }
   return `${issuer}/oauth2/v1/token`;
 }
 
+// /authorize — redirect to Okta with all query params passed through
+app.get("/authorize", (req, res) => {
+  const params = new URLSearchParams(req.query as Record<string, string>);
+  // Ensure Okta gets the right client_id
+  if (!params.has("client_id")) {
+    params.set("client_id", OKTA_CLIENT_ID);
+  }
+  res.redirect(`${oktaAuthorizeUrl(OKTA_ISSUER)}?${params.toString()}`);
+});
+
+// /token — proxy to Okta's token endpoint
+app.post("/token", express.urlencoded({ extended: false }), async (req, res) => {
+  try {
+    const body = new URLSearchParams(req.body as Record<string, string>);
+    // Inject client credentials if the client didn't provide them
+    if (!body.has("client_id")) {
+      body.set("client_id", OKTA_CLIENT_ID);
+    }
+    if (!body.has("client_secret") && OKTA_CLIENT_SECRET) {
+      body.set("client_secret", OKTA_CLIENT_SECRET);
+    }
+
+    const tokenRes = await fetch(oktaTokenUrl(OKTA_ISSUER), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body,
+    });
+
+    const data = await tokenRes.json() as Record<string, unknown>;
+    res.status(tokenRes.status).json(data);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Token exchange failed";
+    res.status(500).json({ error: message });
+  }
+});
+
+// /callback — for manual testing (exchange code for token and display it)
 app.get("/callback", async (req, res) => {
   const code = req.query["code"] as string | undefined;
   if (!code) {
@@ -164,17 +228,10 @@ app.get("/callback", async (req, res) => {
     return;
   }
 
-  if (!OKTA_CLIENT_ID || !OKTA_CLIENT_SECRET) {
-    res.status(500).json({
-      error: "OKTA_CLIENT_ID and OKTA_CLIENT_SECRET must be set for the callback to work",
-    });
-    return;
-  }
-
   const redirectUri = `${req.protocol}://${req.get("host")}/callback`;
 
   try {
-    const tokenRes = await fetch(tokenEndpoint(OKTA_ISSUER), {
+    const tokenRes = await fetch(oktaTokenUrl(OKTA_ISSUER), {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
