@@ -16,7 +16,7 @@ declare global {
 }
 
 const OKTA_ISSUER = process.env["OKTA_ISSUER"]; // e.g. https://yourorg.okta.com/oauth2/default
-const OKTA_AUDIENCE = process.env["OKTA_AUDIENCE"] ?? "api://default";
+const OKTA_AUDIENCE = process.env["OKTA_AUDIENCE"]; // Client ID for Org auth server, api://default for Custom
 const DEV_BYPASS_AUTH = process.env["DEV_BYPASS_AUTH"] === "true";
 
 if (DEV_BYPASS_AUTH) {
@@ -31,8 +31,18 @@ if (DEV_BYPASS_AUTH) {
   );
 }
 
+// Org auth server uses /oauth2/v1/keys, custom auth server uses {issuer}/v1/keys
+function jwksUrl(issuer: string): URL {
+  if (issuer.includes("/oauth2/")) {
+    // Custom authorization server: https://org.okta.com/oauth2/ausXXX
+    return new URL(`${issuer}/v1/keys`);
+  }
+  // Org authorization server: https://org.okta.com
+  return new URL(`${issuer}/oauth2/v1/keys`);
+}
+
 const JWKS = OKTA_ISSUER
-  ? createRemoteJWKSet(new URL(`${OKTA_ISSUER}/v1/keys`))
+  ? createRemoteJWKSet(jwksUrl(OKTA_ISSUER))
   : null;
 
 /**
@@ -67,10 +77,13 @@ export async function oktaAuth(
 
   const token = authHeader.slice(7);
   try {
-    const { payload } = await jwtVerify(token, JWKS, {
+    const verifyOptions: { issuer: string; audience?: string } = {
       issuer: OKTA_ISSUER,
-      audience: OKTA_AUDIENCE,
-    });
+    };
+    if (OKTA_AUDIENCE) {
+      verifyOptions.audience = OKTA_AUDIENCE;
+    }
+    const { payload } = await jwtVerify(token, JWKS, verifyOptions);
     req.oktaClaims = payload as OktaClaims;
     next();
   } catch (err) {
