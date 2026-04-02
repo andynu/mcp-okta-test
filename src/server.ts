@@ -134,6 +134,68 @@ function createMcpServerForUser(claims: OktaClaims, groups: string[]) {
   return server;
 }
 
+// OAuth callback — exchanges the authorization code for a token
+const OKTA_ISSUER = process.env["OKTA_ISSUER"] ?? "";
+const OKTA_CLIENT_ID = process.env["OKTA_CLIENT_ID"] ?? "";
+const OKTA_CLIENT_SECRET = process.env["OKTA_CLIENT_SECRET"] ?? "";
+
+function tokenEndpoint(issuer: string): string {
+  if (issuer.includes("/oauth2/")) {
+    return `${issuer}/v1/token`;
+  }
+  return `${issuer}/oauth2/v1/token`;
+}
+
+app.get("/callback", async (req, res) => {
+  const code = req.query["code"] as string | undefined;
+  if (!code) {
+    res.status(400).json({ error: "Missing code parameter" });
+    return;
+  }
+
+  if (!OKTA_CLIENT_ID || !OKTA_CLIENT_SECRET) {
+    res.status(500).json({
+      error: "OKTA_CLIENT_ID and OKTA_CLIENT_SECRET must be set for the callback to work",
+    });
+    return;
+  }
+
+  const redirectUri = `${req.protocol}://${req.get("host")}/callback`;
+
+  try {
+    const tokenRes = await fetch(tokenEndpoint(OKTA_ISSUER), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: OKTA_CLIENT_ID,
+        client_secret: OKTA_CLIENT_SECRET,
+        code,
+        redirect_uri: redirectUri,
+      }),
+    });
+
+    const data = await tokenRes.json() as Record<string, unknown>;
+
+    if (!tokenRes.ok) {
+      res.status(tokenRes.status).json(data);
+      return;
+    }
+
+    const accessToken = data["access_token"] as string;
+
+    res.json({
+      message: "Authenticated! Use this token with the MCP endpoint.",
+      access_token: accessToken,
+      expires_in: data["expires_in"],
+      usage: `curl -X POST ${req.protocol}://${req.get("host")}/mcp -H 'Authorization: Bearer ${accessToken.slice(0, 20)}...'`,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Token exchange failed";
+    res.status(500).json({ error: message });
+  }
+});
+
 // MCP endpoint — protected by Okta auth
 app.post("/mcp", oktaAuth, async (req, res) => {
   const claims = req.oktaClaims!;
